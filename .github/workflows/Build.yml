@@ -1,120 +1,94 @@
-name: Build_apk
+name: Build APK Only
 
 on:
-  schedule:
-    - cron: 0 13 1 * *
   workflow_dispatch:
-    inputs:
-      rebuild:
-        description: '忽略构建记录以重新构建'
-        required: false
-        type: boolean
-      donotpublish:
-        description: '构建后不提交发布新版'
-        required: false
-        type: boolean
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - userName: q215613905
-            repoName: TVBoxOS
-            branchName: main
-            java_ver: 17   # 添加 Java 版本，Gradle 7.5 需要 Java 17
     steps:
+      # 1. 检出当前仓库（用于读取 README.md 中的 commit 记录）
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      # 2. 检查上游仓库是否有新提交
       - name: Check New Commit
+        id: check_commit
         run: |
-          upStream=https://github.com/${{ matrix.userName }}/${{ matrix.repoName }}
-          echo "upStream=$upStream" >> $GITHUB_ENV
-          commit=$(curl -sL $upStream/commits/${{ matrix.branchName }} |grep -o "/${{ matrix.userName }}/${{ matrix.repoName }}/commit/[a-z0-9]\+" |head -1 | cut -d\/ -f5)
-          if [[ -z "${commit}" ]]; then
-            commit=$(curl -s "https://api.github.com/repos/${{ matrix.userName }}/${{ matrix.repoName }}/commits/${{ matrix.branchName }}?per_page=1" | jq -r '.sha' )
+          # 上游仓库信息（可改为你自己的复刻源，如果是原仓库则保持 q215613905/TVBoxOS）
+          UPSTREAM_USER="q215613905"
+          UPSTREAM_REPO="TVBoxOS"
+          BRANCH="main"
+          UPSTREAM_URL="https://github.com/${UPSTREAM_USER}/${UPSTREAM_REPO}"
+          echo "upStream=${UPSTREAM_URL}" >> $GITHUB_ENV
+
+          # 获取最新 commit SHA
+          commit=$(curl -s "https://api.github.com/repos/${UPSTREAM_USER}/${UPSTREAM_REPO}/commits/${BRANCH}?per_page=1" | jq -r '.sha')
+          if [ -z "$commit" ]; then
+            echo "无法获取上游提交信息"
+            exit 1
           fi
+
+          # 检查 README.md 是否已记录该 commit，若未记录或强制重建则继续
           if ! grep -q "$commit" README.md || [ "${{ inputs.rebuild }}" == "true" ]; then
             echo "commit=$commit" >> $GITHUB_ENV
             echo "commitS=${commit:0:7}" >> $GITHUB_ENV
           fi
           echo "commit=$commit"
 
+      # 3. 克隆上游源码
       - name: Checkout Source Code
         if: ${{ env.commit }}
         run: |
           git clone ${{ env.upStream }} TVBoxOSC
           cd TVBoxOSC
           git checkout ${{ env.commit }}
+          # 生成标签（日期时间）
           echo "tag=$(git log --date=format:'%Y%m%d-%H%M' --pretty=format:%cd ${{ env.commitS }} -1)" >> $GITHUB_ENV
 
-      # ========== 新增：设置 JDK ==========
-      - name: Set up JDK
-        if: ${{ env.commit }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ matrix.java_ver || 17 }}
-
-      # ========== 新增：设置 Android SDK ==========
-      - name: Setup Android SDK
-        if: ${{ env.commit }}
-        uses: android-actions/setup-android@v3
-
-      # ========== 新增：创建 local.properties ==========
-      - name: Create local.properties
-        if: ${{ env.commit }}
-        working-directory: TVBoxOSC
-        run: |
-          echo "sdk.dir=/usr/local/lib/android/sdk" > local.properties
-          cat local.properties
-
-      # ========== 新增：安装必要的 SDK 组件 ==========
-      - name: Install SDK components
-        if: ${{ env.commit }}
-        working-directory: TVBoxOSC
-        run: |
-          # 根据项目实际需要调整版本
-          sdkmanager --list | head -30
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
-
-      # ========== 新增：设置 Python（如果项目使用 Chaquopy） ==========
-      - name: Setup Python
-        if: ${{ env.commit }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.8'   # Chaquopy 12.0.1 支持 3.8-3.10
-
+      # 4. 修改版本号和添加依赖源（可选）
       - name: Extra Modify
         if: ${{ env.commit }}
         working-directory: TVBoxOSC
         run: |
-          echo '修改VersionName'
-          if [ "${{ matrix.userName }}" == "takagen99" ]; then
-            sed -i 's/\.concat(buildTime())/ +\"${{ env.tag }}\"/g' app/build.gradle 
-            sed -i "/android:text=/s#=\"#=\"${{ env.tag }}\\\\n\\\\n#" app/src/main/res/layout/dialog_about.xml
-          else
-             sed -i "/versionName/s#[0-9a-zA-Z_\.\'\"-]\+\$#\'${{ env.tag }}\'#" app/build.gradle
-             sed -i "/android:text=/s#=\"#=\"${{ env.tag }}\\\\n\\\\n#" app/src/main/res/layout/dialog_about.xml
-          fi 
-          echo 'crosswalk源，防挂'
+          # 修改版本名称
+          sed -i "/versionName/s#[0-9a-zA-Z_\.\'\"-]\+\$#\'${{ env.tag }}\'#" app/build.gradle
+          sed -i "/android:text=/s#=\"#=\"${{ env.tag }}\\\\n\\\\n#" app/src/main/res/layout/dialog_about.xml
+          # 添加 crosswalk 源
           if grep -q 'crosswalk' build.gradle; then
-            sed -i "/crosswalk/a\        maven { url 'https://o0halflife0o.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
+            sed -i "/crosswalk/a\        maven { url 'https://j4uq.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
           else
-            sed -i "/jitpack.io/a\        maven { url 'https://o0halflife0o.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
+            sed -i "/jitpack.io/a\        maven { url 'https://j4uq.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
           fi
 
-      - name: Compress Source Code
+      # 5. 设置 Python（如果项目需要 Chaquopy）
+      - name: Setup Python
+        if: ${{ env.commit }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.8'
+
+      - name: Install Python dependencies
+        if: ${{ env.commit }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install lxml ujson pyquery requests jsonpath cachetools pycryptodome beautifulsoup4
+
+      # 6. 修复 pyramid 模块的 Python 路径（Linux 环境）
+      - name: Modify pyramid build.gradle
         if: ${{ env.commit }}
         working-directory: TVBoxOSC
         run: |
-          tar -cJf sourceCode-${{ env.commitS }}.tar.xz --exclude=.git --exclude=.github *
+          sed -i '/buildPython.*python.exe/d' pyramid/build.gradle
 
+      # 7. 创建空的 local.properties（避免 SDK 路径报错）
+      - name: Setup local.properties
+        if: ${{ env.commit }}
+        working-directory: TVBoxOSC
+        run: echo "" > local.properties
+
+      # 8. 配置签名（需确保 .github/workflows/TVBoxOSC.jks 存在）
       - name: Release Apk Sign
         if: ${{ env.commit }}
         working-directory: TVBoxOSC
@@ -129,22 +103,29 @@ jobs:
           sed -i '$a\RELEASE_KEY_ALIAS=TVBoxOSC'            ./gradle.properties
           sed -i '$a\RELEASE_STORE_PASSWORD=TVBoxOSC'       ./gradle.properties
           sed -i '$a\RELEASE_KEY_PASSWORD=TVBoxOSC'         ./gradle.properties
-          sed -i 's/^#\(org.gradle.jvmargs=.*\)/\1/'        ./gradle.properties
 
-      - uses: gradle/actions/setup-gradle@v4
-        if: ${{ env.commit }}
+      # 9. 设置 Java（Gradle 7.5 需要 Java 17）
+      - name: Setup Java
+        uses: actions/setup-java@v5
         with:
-          cache-read-only: false   # 启用缓存写入
+          distribution: temurin
+          java-version: 17
 
+      # 10. 设置 Gradle 缓存
+      - name: Setup Gradle
+        if: ${{ env.commit }}
+        uses: gradle/actions/setup-gradle@v6
+
+      # 11. 构建 Release APK
       - name: Build With Gradle
         if: ${{ env.commit }}
         working-directory: TVBoxOSC
         run: |
           chmod +x gradlew
-          # 注意：assembleRelease 的大小写
-          ./gradlew assembleRelease --build-cache --parallel --daemon --warning-mode all
+          ./gradlew assemblerelease --build-cache --parallel --daemon --warning-mode all
 
-      - name: Prepare App
+      # 12. 整理 APK 文件
+      - name: Prepare APK
         if: ${{ env.commit }}
         working-directory: TVBoxOSC
         run: |
@@ -152,42 +133,20 @@ jobs:
           mkdir -p apk/
           for file in `find ~ -name "*release*.apk" -print`; do
             base=$(basename "$file")
-            if [[ "$base" == TVBox_* ]]; then
-              new_base=$(echo "$base" | sed "s/release/${{ matrix.userName }}_${{ env.tag }}/")
-            else
-              new_base="TVBox_${{ matrix.userName }}_${{ env.tag }}.apk"
-            fi
+            # 重命名，增加上游用户名和标签
+            new_base="TVBox_q215613905_${{ env.tag }}.apk"
             mv "$file" "apk/$new_base"
           done
-          mv sourceCode-${{ env.commitS }}.* apk/
 
-      - name: Release Note
-        if: ${{ env.commit }}
-        working-directory: TVBoxOSC
-        run: |
-          lastCommit=$(grep "${{ matrix.userName }}\/${{ matrix.repoName }}" ${{ github.workspace }}/README.md |grep -o '[a-z0-9]\{40\}')
-          export LESSCHARSET=utf-8
-          echo -e "Credit: [${{ matrix.userName }}](${{ env.upStream }})\nCommit: ${{ env.commit }}\nChangelog:\n\`\`\`" > apk/${{ matrix.userName }}-Release.log
-          if [ "${{ env.commit }}" == "${lastCommit}" ]; then
-            git log --pretty=format:%B ${{ env.commitS }} -1 |sed -e "s# \{2,\}#\n#g" -e "/^Merge \(pull\|branch\|remote\)/d" -e '/^$/d' |cat -n |sort -k2,2 -k1,1n |uniq -f1 |sort -k1,1n |cut -f2- >> apk/${{ matrix.userName }}-Release.log
-          else
-            git log --pretty=format:%B ${{ env.commitS }}...${lastCommit:0:7} |sed -e "s# \{2,\}#\n#g" -e "/^Merge \(pull\|branch\|remote\)/d" -e '/^$/d' |cat -n |sort -k2,2 -k1,1n |uniq -f1 |sort -k1,1n |cut -f2- >> apk/${{ matrix.userName }}-Release.log
-          fi
-          echo -e '\n```' >> apk/${{ matrix.userName }}-Release.log
-
-      - name: Upload App To Artifact
-        uses: actions/upload-artifact@v4
+      # 13. 上传 APK 作为 Artifact（可在 Actions 页面下载）
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v7
         if: ${{ env.commit }}
         with:
-          name: ${{ matrix.userName }}-${{ matrix.repoName }}
-          path: |
-            TVBoxOSC/apk/*
+          name: TVBoxOS-APK
+          path: TVBoxOSC/apk/*.apk
 
-      - name: Whether Or Not to Publish
-        if: ${{ inputs.donotpublish && env.commit }}
-        run: |
-          echo "commit=" >> $GITHUB_ENV
-
+  # 可选：清理旧的构建记录，保留最近 14 天或至少 10 个
   clean:
     needs: build
     runs-on: ubuntu-latest
